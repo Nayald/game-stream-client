@@ -40,7 +40,7 @@ void RTPAudioReceiver::init(const char *path) {
     av_dict_set(&options,"protocol_whitelist","file,udp,rtp,rtp_mpegts,rtcp",0);
     //av_dict_set(&options,"probesize","1M",0);
     //av_dict_set(&options,"fifo_size","1M",0);
-    //av_dict_set(&options,"buffer_size","384K",0);
+    av_dict_set(&options,"buffer_size","384K",0);
     if (avformat_open_input(&format_ctx, path, NULL, &options) != 0) {
         throw InitFail("Couldn't open input stream");
     }
@@ -73,8 +73,12 @@ void RTPAudioReceiver::init(const char *path) {
     std::cerr << name << ": initialized" << std::endl;
 }
 
+AVCodecContext* RTPAudioReceiver::getContext() const {
+    return codec_ctx;
+}
+
 void RTPAudioReceiver::start() {
-    startDrain();
+    //startDrain();
     startReceive();
 }
 
@@ -108,7 +112,7 @@ void RTPAudioReceiver::receive() {
             Source<AVPacket>::forward(packet);
 
             // for 2 threads
-            decoder_lock.lock();
+            /*decoder_lock.lock();
             ret = avcodec_send_packet(codec_ctx, packet);
             decoder_lock.unlock();
             decoder_cv.notify_all();
@@ -116,10 +120,10 @@ void RTPAudioReceiver::receive() {
                 std::cout << name << ": encoder buffer may be full, drop frame" << std::endl;
             } else if (ret < 0) {
                 throw RunError("error when sending frame to encoder");
-            }
+            }*/
 
             // for 1 thread
-            /*ret = avcodec_send_packet(codec_ctx, packet);
+            ret = avcodec_send_packet(codec_ctx, packet);
             if (ret < 0) {
                 throw RunError("decode packet error");
             }
@@ -134,7 +138,7 @@ void RTPAudioReceiver::receive() {
 
                 Source<AVFrame>::forward(frame);
                 av_frame_unref(frame);
-            }*/
+            }
 
             av_packet_unref(packet);
         }

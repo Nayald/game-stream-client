@@ -9,29 +9,29 @@
 #include <unordered_set>
 
 #include "SDLDisplay.h"
+#include "exception.h"
 
 constexpr int32_t LOOP_MIN_TIME = 8; // max 125Hz, most common polling freq
 
-SDLDisplay::SDLDisplay() : audio_frame_queue(2), video_frame_queue(2) {
+void fill_audio(void *userdata, Uint8 *stream, int len) {
+    //std::cout << sample_queue.size_approx() << std::endl;
+    /*while (sample_queue.size_approx() > 2 * len) {
+        sample_queue.try_dequeue_bulk(stream, len);
+    }*/
+    //if (ssize_t extra_size = ((moodycamel::ConcurrentQueue<uint8_t>*)userdata)->size_approx() - (40 * 48 * 2 * sizeof(float)); extra_size > 0) {
+    //    ((moodycamel::ConcurrentQueue<uint8_t>*)userdata)->try_dequeue_bulk(stream, extra_size);
+    //}
+
+    size_t size = ((moodycamel::ConcurrentQueue<uint8_t>*)userdata)->try_dequeue_bulk(stream, len);
+    memset(stream + size, 0, len - size);
+}
+
+SDLDisplay::SDLDisplay() : name("sdl display"), audio_frame_queue(4), sample_queue(8192), video_frame_queue(8) {
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_TIMER);
-
-    screen = SDL_CreateWindow("Remote Desktop Client",
-                              SDL_WINDOWPOS_CENTERED,
-                              SDL_WINDOWPOS_CENTERED,
-                              1280, 720,
-                              SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-
-    renderer = SDL_CreateRenderer(screen, -1, SDL_RENDERER_ACCELERATED);
-    SDL_RenderSetViewport(renderer, NULL);
-    texture_rgb = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, 1920, 1080);
-    texture_yuv420 = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_YV12, SDL_TEXTUREACCESS_STREAMING, 1920, 1080);
-    texture_nv12 = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_NV12, SDL_TEXTUREACCESS_STREAMING, 1920, 1080);
-    const char scale_mode = SDL_ScaleModeLinear;
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, &scale_mode);
 }
 
 SDLDisplay::~SDLDisplay() {
-    stopDisplay();
+    stop();
     SDL_DestroyTexture(texture_yuv420);
     SDL_DestroyTexture(texture_nv12);
     SDL_DestroyRenderer(renderer);
@@ -39,6 +39,105 @@ SDLDisplay::~SDLDisplay() {
     for (SDL_GameController* gamepad : gamepads) {
         SDL_GameControllerClose(gamepad);
     }
+    SDL_CloseAudioDevice(dev);
+}
+
+void SDLDisplay::init(AVCodecContext *audio_ctx, AVCodecContext *video_ctx) {
+    SDL_DestroyWindow(screen);
+    screen = SDL_CreateWindow("Remote Desktop Client",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,
+                              1280, 720,SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+
+    SDL_DestroyRenderer(renderer);
+    renderer = SDL_CreateRenderer(screen, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE);
+    SDL_RenderSetViewport(renderer, NULL);
+
+    //SDL_RenderSetIntegerScale(renderer, SDL_TRUE);
+    const char scale_mode = SDL_ScaleModeLinear;
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, &scale_mode);
+
+    //texture_rgb = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, 1920, 1080);
+    SDL_DestroyTexture(texture_yuv420);
+    texture_yuv420 = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_YV12, SDL_TEXTUREACCESS_STREAMING, video_ctx->width, video_ctx->height);
+    SDL_SetTextureBlendMode(texture_yuv420, SDL_BLENDMODE_NONE);
+    SDL_DestroyTexture(texture_nv12);
+    texture_nv12 = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_NV12, SDL_TEXTUREACCESS_STREAMING, video_ctx->width, video_ctx->height);
+    SDL_SetTextureBlendMode(texture_nv12, SDL_BLENDMODE_NONE);
+
+    SDL_AudioSpec wanted;
+    SDL_zero(wanted);
+    SDL_zero(given);
+    wanted.format = AUDIO_F32SYS;
+    wanted.freq = audio_ctx->sample_rate;
+    wanted.channels = audio_ctx->channels;
+    wanted.samples = 512;
+    wanted.callback = nullptr;
+    //wanted.callback = fill_audio;
+    //wanted.userdata = &sample_queue;
+
+    SDL_CloseAudioDevice(dev);
+    dev = SDL_OpenAudioDevice(NULL, 0, &wanted, &given, 0);
+    if (dev <= 0) {
+        std::cout << "audio error" << std::endl;
+    }
+
+    std::cerr << "audio open with the given values: " << given.freq << "Hz, " << (int)given.channels << "ch, buffer total size is " << given.size << " bytes" << std::endl;
+    SDL_PauseAudioDevice(dev, 0);
+}
+
+void SDLDisplay::initAudio(AVCodecContext *audio_ctx) {
+    SDL_AudioSpec wanted;
+    SDL_zero(wanted);
+    SDL_zero(given);
+    wanted.format = AUDIO_F32SYS;
+    wanted.freq = audio_ctx->sample_rate;
+    wanted.channels = audio_ctx->channels;
+    wanted.samples = 512;
+    wanted.callback = nullptr;
+    //wanted.callback = fill_audio;
+    //wanted.userdata = &sample_queue;
+
+    SDL_CloseAudioDevice(dev);
+    dev = SDL_OpenAudioDevice(NULL, 0, &wanted, &given, 0);
+    if (dev <= 0) {
+        std::cout << "audio error" << std::endl;
+    }
+
+    std::cerr << "audio open with the given values: " << given.freq << "Hz, " << (int)given.channels << "ch, buffer total size is " << given.size << " bytes" << std::endl;
+    SDL_PauseAudioDevice(dev, 0);
+}
+
+void SDLDisplay::initVideo(AVCodecContext *video_ctx) {
+    SDL_DestroyWindow(screen);
+    screen = SDL_CreateWindow("Remote Desktop Client",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,
+                              1280, 720,SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+
+    SDL_DestroyRenderer(renderer);
+    renderer = SDL_CreateRenderer(screen, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE);
+    SDL_RenderSetViewport(renderer, NULL);
+
+    //SDL_RenderSetIntegerScale(renderer, SDL_TRUE);
+    const char scale_mode = SDL_ScaleModeLinear;
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, &scale_mode);
+
+    //texture_rgb = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, 1920, 1080);
+    SDL_DestroyTexture(texture_yuv420);
+    texture_yuv420 = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_YV12, SDL_TEXTUREACCESS_STREAMING, video_ctx->width, video_ctx->height);
+    SDL_SetTextureBlendMode(texture_yuv420, SDL_BLENDMODE_NONE);
+    SDL_DestroyTexture(texture_nv12);
+    texture_nv12 = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_NV12, SDL_TEXTUREACCESS_STREAMING, video_ctx->width, video_ctx->height);
+    SDL_SetTextureBlendMode(texture_nv12, SDL_BLENDMODE_NONE);
+}
+
+void SDLDisplay::start() {
+    startDisplay();
+    startAudio();
+    startEvent();
+}
+
+void SDLDisplay::stop() {
+    stopEvent();
+    stopAudio();
+    stopDisplay();
 }
 
 void SDLDisplay::startDisplay() {
@@ -48,6 +147,10 @@ void SDLDisplay::startDisplay() {
     }
 }
 
+static inline uint32_t log_2(const uint32_t x) {
+    return x ? (31 - __builtin_clz (x)) : 0;
+}
+
 void SDLDisplay::runDisplay() {
     Uint32 start = SDL_GetTicks();
     Uint32 last = 0;
@@ -55,57 +158,20 @@ void SDLDisplay::runDisplay() {
     int i = 0;
     int j = 0;
     AVFrame *frame;
-    SDL_Texture *texture;
-    int ret;
+    uint64_t calculated_next_pts = 0;
     while (!display_stop_condition) {
         if (!video_frame_queue.wait_dequeue_timed(frame, std::chrono::milliseconds(100))) {
             continue;
         }
 
-        // frame are displayed ~10ms, may avoid lagging because some frames are consumed too fast
-        if (int32_t time = 10 + last - SDL_GetTicks(); time > 0) {
-            //std::cout << "wait " << time << std::endl;
-            SDL_Delay(time);
+        if (int64_t wait_ticks = calculated_next_pts - frame->pts; wait_ticks > 0) {
+            std::cout << "need to wait " << wait_ticks / 90 << "ms before present next frame" << std::endl;
+            SDL_Delay(wait_ticks / 90); // in milliseconds, rtp sample rate = 90000Hz
         }
 
-        switch (frame->format) {
-/*            case AV_PIX_FMT_GBRP:
-                Uint8 *pixels;
-                int pitch;
-                SDL_LockTexture(texture = texture_rgb, NULL, (void**)&pixels, &pitch);
-                for (int k = 0; k < 100; ++k) {
-                    memcpy(pixels + 3 * k * pitch, frame->data[0] + k * pitch, pitch);
-                    memcpy(pixels + (3 * k + 1) * pitch, frame->data[1] + k * pitch, pitch);
-                    memcpy(pixels + (3 * k + 2) * pitch, frame->data[2] + k * pitch, pitch);
-                }
-
-                SDL_UnlockTexture(texture);
-                break;*/
-            case AV_PIX_FMT_YUV420P:
-                ret = SDL_UpdateYUVTexture(texture = texture_yuv420, NULL,
-                                           frame->data[0], frame->linesize[0],
-                                           frame->data[1], frame->linesize[1],
-                                           frame->data[2], frame->linesize[2]);
-                break;
-            case AV_PIX_FMT_NV12:
-                ret = SDL_UpdateNVTexture(texture = texture_nv12, NULL,
-                                          frame->data[0], frame->linesize[0],
-                                          frame->data[1], frame->linesize[1]);
-                break;
-            default:
-                char buffer[32];
-                std::cout << "no rule for " << av_fourcc_make_string(buffer, avcodec_pix_fmt_to_codec_tag((AVPixelFormat)frame->format)) << std::endl;
-                break;
-        }
-
-        if (ret < 0) {
-            std::cout << SDL_GetError() << std::endl;
-        } else {
-            SDL_RenderClear(renderer);
-            SDL_RenderCopy(renderer, texture, NULL, NULL);
-            SDL_RenderPresent(renderer);
-        }
-
+        calculated_next_pts = frame->pts + frame->pkt_duration;
+        int64_t presentation_time = frame->pkt_duration / 90 - log_2(video_frame_queue.size_approx());
+        displayImpl(frame);
         av_frame_free(&frame);
         ++j;
         if (SDL_GetTicks() - start >= 1000) {
@@ -117,7 +183,9 @@ void SDLDisplay::runDisplay() {
             delay = 0;
         }
 
-        last = SDL_GetTicks();
+        //std::cout << "frame will be displayed " << presentation_time << "ms, " << video_frame_queue.size_approx() << " waiting" << std::endl;
+        //SDL_Delay(12);
+        SDL_Delay(presentation_time > 0 ? presentation_time : 0);
     }
 }
 
@@ -137,20 +205,6 @@ void SDLDisplay::startAudio() {
     }
 }
 
-void fill_audio(void *userdata, Uint8 *stream, int len) {
-    //SDL 2.0
-    //std::cout << sample_queue.size_approx() << std::endl;
-    /*while (sample_queue.size_approx() > 2 * len) {
-        sample_queue.try_dequeue_bulk(stream, len);
-    }*/
-    //if (ssize_t extra_size = ((moodycamel::ConcurrentQueue<uint8_t>*)userdata)->size_approx() - (40 * 48 * 2 * sizeof(float)); extra_size > 0) {
-    //    ((moodycamel::ConcurrentQueue<uint8_t>*)userdata)->try_dequeue_bulk(stream, extra_size);
-    //}
-
-    size_t size = ((moodycamel::ConcurrentQueue<uint8_t>*)userdata)->try_dequeue_bulk(stream, len);
-    memset(stream + size, 0, len - size);
-}
-
 void SDLDisplay::runAudio() {
     /*SwrContext *swr_ctx = swr_alloc();
     //swr_alloc_set_opts(NULL, av_get_default_channel_layout(2), AV_SAMPLE_FMT_S16, 48000,
@@ -166,51 +220,28 @@ void SDLDisplay::runAudio() {
         exit(-1);
     }*/
 
-    SDL_AudioSpec wanted, given;
-    SDL_zero(wanted);
-    SDL_zero(given);
-    wanted.format = AUDIO_F32SYS;
-    wanted.freq = 48000;
-    wanted.channels = 2;
-    wanted.silence = 0;
-    wanted.samples = 512;
-    wanted.callback = fill_audio;
-    moodycamel::ConcurrentQueue<uint8_t> queue(20 * 48 * 2 * sizeof(float));
-    wanted.userdata = &queue;
-
-    SDL_AudioDeviceID dev = SDL_OpenAudioDevice(NULL, 0, &wanted, &given, 0);
-    if (dev <= 0) {
-        std::cout << "audio error" << std::endl;
-    }
-
-    SDL_PauseAudioDevice(dev, 0);
-
-    AVFrame *frame_in;
+    AVFrame *frame;
     /*AVFrame *frame_out = av_frame_alloc();
     frame_out->channels = 2;
     frame_out->channel_layout = av_get_default_channel_layout(frame_out->channels);
     frame_out->format = AV_SAMPLE_FMT_FLT;
     frame_out->sample_rate = 48000;*/
     //uint8_t data[frame_out->channels * 2048 * sizeof(float)];
-    while (!audio_stop_condition) {
-        try {
-            if (!audio_frame_queue.wait_dequeue_timed(frame_in, std::chrono::milliseconds(100))) {
+
+    try {
+        while (!audio_stop_condition) {
+            if (!audio_frame_queue.wait_dequeue_timed(frame, std::chrono::milliseconds(100))) {
                 continue;
             }
-            //int size = swr_convert(swr_ctx, (uint8_t**)&data, 512, (const uint8_t**)frame_in->data, frame_in->linesize[0]);
-            // planar to interleaved audio ([a1,a2], [b1,b2]) -> (a1,b1,a2,b2)
-            for (int i = 0; i < frame_in->nb_samples; ++i) {
-                for (int c = 0; c < given.channels; ++c) {
-                    queue.enqueue_bulk(frame_in->data[0] + sizeof(float) * i, sizeof(float));
-                }
-            }
-        } catch (const std::exception &e) {
-            std::cerr << e.what() << std::endl;
-        }
 
-        av_frame_free(&frame_in);
+            //int size = swr_convert(swr_ctx, (uint8_t**)&data, 512, (const uint8_t**)frame_in->data, frame_in->linesize[0]);
+            audioImpl(frame);
+        }
+    } catch (const std::exception &e) {
+        std::cerr << e.what() << std::endl;
     }
 
+    av_frame_free(&frame);
     SDL_CloseAudioDevice(dev);
 }
 
@@ -223,14 +254,14 @@ void SDLDisplay::stopAudio() {
     }
 }
 
-void SDLDisplay::startListening() {
+void SDLDisplay::startEvent() {
     if (event_stop_condition) {
         event_stop_condition = false;
-        event_thread = std::thread(&SDLDisplay::listenEvent, this);
+        event_thread = std::thread(&SDLDisplay::runEvent, this);
     }
 }
 
-void SDLDisplay::listenEvent() {
+void SDLDisplay::runEvent() {
 #ifdef DEBUG
     std::cerr << "input listening thread is " << gettid() << std::endl;
 #endif
@@ -370,28 +401,30 @@ void SDLDisplay::listenEvent() {
 
         if (x != 0 || y != 0) {
             ss << R"(,"m":[)" << x << ',' << y << ']';
-            x = y = 0;
+            x = 0;
+            y = 0;
         }
 
-        if (mouse_button_states != last_mouse_button_states) {
+        //if (mouse_button_states != last_mouse_button_states) {
             ss << R"(,"b":)" << (int) mouse_button_states;
             last_mouse_button_states = mouse_button_states;
-        }
+        //}
 
         if (wx || wy) {
             ss << R"(,"w":[)" << wx << ',' << wy << ']';
-            wx = wy = 0;
+            wx = 0;
+            wy = 0;
         }
 
-        if (std::find_if(gamepad_axis.begin(), gamepad_axis.end(), [](auto e) { return e != 0; }) != gamepad_axis.end()) {
+        //if (std::find_if(gamepad_axis.begin(), gamepad_axis.end(), [](auto e) { return e != 0; }) != gamepad_axis.end()) {
             ss << R"(,"a":[)" << (int) gamepad_axis[0] << ',' << (int) gamepad_axis[1] << ',' << (int) gamepad_axis[2]
                << ',' << (int) gamepad_axis[3] << ',' << (int) gamepad_axis[4] << ',' << (int) gamepad_axis[5] << ']';
-        }
+        //}
 
-        if (gamepad_button_states != last_gamepad_button_states) {
+        //if (gamepad_button_states != last_gamepad_button_states) {
             ss << R"(,"c":)" << (int) gamepad_button_states;
             last_gamepad_button_states = gamepad_button_states;
-        }
+        //}
 
         ss << '}';
 
@@ -414,7 +447,7 @@ void SDLDisplay::listenEvent() {
     }
 }
 
-void SDLDisplay::stopListening() {
+void SDLDisplay::stopEvent() {
     if (!event_stop_condition) {
         event_stop_condition = true;
         if (event_thread.joinable()) {
@@ -425,12 +458,86 @@ void SDLDisplay::stopListening() {
 
 void SDLDisplay::handle(AVFrame *frame) {
     if (frame->width == 0) {
-        if (!audio_frame_queue.try_enqueue(frame)) {
+        if (audio_thread.joinable()) {
+            if (!audio_frame_queue.try_enqueue(frame)) {
+                std::cout << name << ": audio queue full, drop" << std::endl;
+                av_frame_free(&frame);
+            }
+        } else {
+            audioImpl(frame);
             av_frame_free(&frame);
         }
     } else {
-        if (!video_frame_queue.try_enqueue(frame)) {
+        if (display_thread.joinable()) {
+            if (!video_frame_queue.try_enqueue(frame)) {
+                std::cout << name << ": video queue full, drop" << std::endl;
+                av_frame_free(&frame);
+            }
+        } else {
+            displayImpl(frame);
             av_frame_free(&frame);
+        }
+    }
+}
+
+void SDLDisplay::displayImpl(AVFrame *frame) {
+    SDL_Texture *texture;
+    int ret;
+    switch (frame->format) {
+/*            case AV_PIX_FMT_GBRP:
+                Uint8 *pixels;
+                int pitch;
+                SDL_LockTexture(texture = texture_rgb, NULL, (void**)&pixels, &pitch);
+                for (int k = 0; k < 100; ++k) {
+                    memcpy(pixels + 3 * k * pitch, frame->data[0] + k * pitch, pitch);
+                    memcpy(pixels + (3 * k + 1) * pitch, frame->data[1] + k * pitch, pitch);
+                    memcpy(pixels + (3 * k + 2) * pitch, frame->data[2] + k * pitch, pitch);
+                }
+
+                SDL_UnlockTexture(texture);
+                break;*/
+        case AV_PIX_FMT_YUV420P:
+            ret = SDL_UpdateYUVTexture(texture = texture_yuv420, NULL,
+                                       frame->data[0], frame->linesize[0],
+                                       frame->data[1], frame->linesize[1],
+                                       frame->data[2], frame->linesize[2]);
+            break;
+        case AV_PIX_FMT_NV12:
+            ret = SDL_UpdateNVTexture(texture = texture_nv12, NULL,
+                                      frame->data[0], frame->linesize[0],
+                                      frame->data[1], frame->linesize[1]);
+            break;
+        default:
+            char buffer[32];
+            std::cout << "no rule for " << av_fourcc_make_string(buffer, avcodec_pix_fmt_to_codec_tag((AVPixelFormat)frame->format)) << std::endl;
+            break;
+    }
+
+    if (ret < 0) {
+        std::cout << SDL_GetError() << std::endl;
+    } else {
+        //SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, texture, NULL, NULL);
+        SDL_RenderPresent(renderer);
+    }
+}
+
+void SDLDisplay::audioImpl(AVFrame *frame) {
+    // for callback
+    // planar to interleaved audio ([a1,a2], [b1,b2]) -> (a1,b1,a2,b2)
+    /*for (int i = 0; i < frame->nb_samples; ++i) {
+        for (int c = 0; c < given.channels; ++c) {
+            sample_queue.enqueue_bulk(frame->data[c] + sizeof(float) * i, sizeof(float));
+        }
+    }*/
+
+    if (SDL_GetQueuedAudioSize(dev) > 8 * given.size) {
+        SDL_ClearQueuedAudio(dev);
+    }
+
+    for (int i = 0; i < frame->nb_samples; ++i) {
+        for (int c = 0; c < given.channels; ++c) {
+            SDL_QueueAudio(dev, frame->data[c] + sizeof(float) * i, sizeof(float));
         }
     }
 }

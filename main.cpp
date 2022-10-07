@@ -8,27 +8,27 @@ extern "C" {
 
 #include <iostream>
 #include <thread>
+#include <atomic>
 #include <csignal>
 #include "RTPAudioReceiver.h"
 #include "SDLDisplay.h"
 #include "CommandSocket.h"
 
-bool stop = false;
+std::atomic<bool> stop = false;
 void signalHandler( int signum ) {
     std::cout << "Interrupt signal (" << signum << ") received.\n";
-    stop = true;
+    stop.store(true, std::memory_order_relaxed);
 }
 
 int main(int argc, char **argv) {
     if (argc <= 1) {
-        std::cout << argv[0] << ": remote_ip remote_port local_port" << std::endl;
+        std::cout << argv[0] << ": <remote_ip> [remote_port] [local_port]" << std::endl;
+        return -1;
     }
 
     const char* remote_ip = argv[1];
-    //const uint16_t remote_port = std::strtoul(argv[2], nullptr, 10);
-    const uint16_t remote_port = 9999;
-    //const uint16_t local_port = std::strtoul(argv[3], nullptr, 10);
-    const uint16_t local_port = 9999;
+    const uint16_t remote_port = argc > 2 ? std::strtoul(argv[2], nullptr, 10) : 9999;
+    const uint16_t local_port = argc > 3 ? std::strtoul(argv[3], nullptr, 10) : 9999;
 
     signal(SIGINT, signalHandler);
     //signal(SIGTERM, signalHandler);
@@ -38,33 +38,25 @@ int main(int argc, char **argv) {
 
     try {
         SDLDisplay display;
-        RTPAudioReceiver rtp_audio;
-        RTPVideoReceiver rtp_video;
-        rtp_audio.Source<AVFrame>::attachSink(&display);
-        rtp_video.Source<AVFrame>::attachSink(&display);
-
-        CommandSocket client(rtp_audio, rtp_video, display);
-        client.init(remote_ip, remote_port, local_port);
+        CommandSocket client(display);
         display.attachInputSink(&client);
+        client.init(remote_ip, remote_port, local_port);
 
-        client.startListen();
         display.startDisplay();
-        display.startListening();
-        display.startAudio();
+        client.start();
         client.writeCommand(R"({"t":"r","q":"rtp"})");
-        client.startKeepAlive();
+        display.startEvent();
 
-        while (!stop) {
+        while (!stop.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
 
-        rtp_audio.stop();
-        rtp_video.stop();
-        display.stopListening();
-        display.stopAudio();
-        display.stopDisplay();
+        display.stopEvent();
+        client.stop();
 
     } catch (const std::exception &e) {
         std::cerr << e.what() << std::endl;
     }
+
+    return 0;
 }

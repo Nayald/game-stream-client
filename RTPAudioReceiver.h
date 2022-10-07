@@ -39,6 +39,7 @@ public:
     ~RTPAudioReceiver();
 
     void init(const char *path);
+    AVCodecContext* getContext() const;
 
     void start();
     void stop();

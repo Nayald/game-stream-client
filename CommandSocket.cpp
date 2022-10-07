@@ -16,13 +16,16 @@
 constexpr size_t BUFFER_SIZE = 4096;
 constexpr auto KEEPALIVE_DELAY = std::chrono::seconds(1);
 
-CommandSocket::CommandSocket(RTPAudioReceiver &rtp_audio, RTPVideoReceiver &rtp_video, SDLDisplay &display) : rtp_audio(rtp_audio), rtp_video(rtp_video), display(display) {
+CommandSocket::CommandSocket(SDLDisplay &display) : name("socket client"), display(display) {
 
 }
 
 CommandSocket::~CommandSocket() {
     close(tcp_socket);
     close(udp_socket);
+    display.stop();
+    rtp_audio.stop();
+    rtp_video.stop();
 }
 
 void CommandSocket::init(const char *remote_ip, uint16_t remote_port, uint16_t local_port) {
@@ -86,8 +89,20 @@ void CommandSocket::init(const char *remote_ip, uint16_t remote_port, uint16_t l
     }
 }
 
+void CommandSocket::start() {
+    startListen();
+    startKeepAlive();
+    display.startEvent();
+}
+
+void CommandSocket::stop() {
+    display.stopEvent();
+    stopKeepAlive();
+    stopListen();
+}
+
 void CommandSocket::startListen() {
-    listen_stop_condition = false;
+    listen_stop_condition.store(false, std::memory_order_relaxed);
     listen_thread = std::thread(&CommandSocket::listen, this);
 }
 
@@ -97,7 +112,7 @@ void CommandSocket::listen() {
     char buffer[BUFFER_SIZE];
     char stream_buffer[2 * BUFFER_SIZE];
     size_t stream_size = 0;
-    while (!listen_stop_condition) {
+    while (!listen_stop_condition.load(std::memory_order_relaxed)) {
         FD_ZERO(&fds);
         FD_SET(tcp_socket, &fds);
         FD_SET(udp_socket, &fds);
@@ -135,23 +150,36 @@ void CommandSocket::listen() {
 }
 
 void CommandSocket::stopListen() {
-    listen_stop_condition = true;
+    listen_stop_condition.store(true, std::memory_order_relaxed);
     listen_thread.join();
 }
 
 void CommandSocket::startKeepAlive() {
-    keepalive_stop_condition = false;
+    keepalive_stop_condition.store(false, std::memory_order_relaxed);
     keepalive_thread = std::thread(&CommandSocket::keepAlive, this);
 }
 
 void CommandSocket::keepAlive() {
-    while (!keepalive_stop_condition) {
+    while (!keepalive_stop_condition.load(std::memory_order_relaxed)) {
         const auto delta = KEEPALIVE_DELAY + send_timepoint - std::chrono::steady_clock::now();
         if (delta.count() <= 0) {
             writeCommand(R"({"t":"k"})");
         } else {
             std::this_thread::sleep_for(delta);
         }
+    }
+}
+
+void CommandSocket::stopKeepAlive() {
+    if (!keepalive_stop_condition.load(std::memory_order_relaxed)) {
+        keepalive_stop_condition.store(true, std::memory_order_relaxed);
+        if (keepalive_thread.joinable()) {
+            keepalive_thread.join();
+        } else {
+            std::cout << name << ": keepalive thread is not joinable" << std::endl;
+        }
+    } else {
+        std::cout << name << ": keepalive thread already stopped" << std::endl;
     }
 }
 
@@ -164,25 +192,67 @@ size_t CommandSocket::handleCommand(const char *buffer, size_t size, size_t capa
         if (type == "R") {
             const int64_t idx = document["g"];
             if (idx == 0) {
-                std::string_view reply = document["r"];
-                std::ofstream file;
-                file.open("./sdp_video");
-                file << reply << std::endl;
-                file.close();
+                const int64_t kind = document["k"];
+                const std::string_view val = document["v"];
+                switch (kind) {
+                    case 0: {// sdp
+                        std::ofstream file;
+                        file.open("./sdp_audio");
+                        file << val << std::endl;
+                        file.close();
 
-                rtp_video.stop();
-                rtp_video.init("./sdp_video");
-                rtp_video.start();
+                        display.stopAudio();
+                        rtp_audio.stop();
+                        display.stopDisplay();
+                        rtp_audio.init("./sdp_audio");
+                        display.initAudio(rtp_audio.getContext());
+                        rtp_audio.Source<AVFrame>::attachSink(&display);
+                        rtp_audio.start();
+                        display.startAudio();
+                        break;
+                    }
+                    case 1: {// rtp_mpegts
+                        rtp_audio.stop();
+                        rtp_audio.init(val.data());
+                        rtp_audio.start();
+                        break;
+                    }
+                    default:
+                        std::cout << "unknown kind, unable to init audio rtp stream" << std::endl;
+                }
             } else if (idx == 1) {
-                std::string_view reply = document["r"];
-                std::ofstream file;
-                file.open("./sdp_audio");
-                file << reply << std::endl;
-                file.close();
+                const int64_t kind = document["k"];
+                const std::string_view val = document["v"];
+                switch (kind) {
+                    case 0: {// sdp
+                        std::ofstream file;
+                        file.open("./sdp_video");
+                        file << val << std::endl;
+                        file.close();
 
-                rtp_audio.stop();
-                rtp_audio.init("./sdp_audio");
-                rtp_audio.start();
+                        display.stopDisplay();
+                        rtp_video.stop();
+                        display.stopDisplay();
+                        rtp_video.init("./sdp_video");
+                        display.initVideo(rtp_video.getContext());
+                        rtp_video.Source<AVFrame>::attachSink(&display);
+                        rtp_video.start();
+                        display.startDisplay();
+                        break;
+                    }
+                    case 1: {// rtp_mpegts
+                        display.stopDisplay();
+                        rtp_video.stop();
+                        rtp_video.init(val.data());
+                        display.initVideo(rtp_video.getContext());
+                        rtp_video.Source<AVFrame>::attachSink(&display);
+                        rtp_video.start();
+                        display.startDisplay();
+                        break;
+                    }
+                    default:
+                        std::cout << "unknown kind, unable to init video rtp stream" << std::endl;
+                }
             }
         }
     } catch (const simdjson::simdjson_error &err) {

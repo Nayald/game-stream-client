@@ -61,7 +61,7 @@ void RTPVideoReceiver::init(const char *path) {
     //av_dict_set(&options,"framerate","-1",0);
     //av_dict_set(&options, "probesize", "4M", 0);
     av_dict_set(&options, "fifo_size", "16M", 0);
-    av_dict_set(&options, "buffer_size", "384K", 0);
+    av_dict_set(&options, "buffer_size", "1M", 0);
     if (avformat_open_input(&format_ctx, path, NULL, &options) != 0) {
     //if (avformat_open_input(&format_ctx, "rtp://127.0.0.1:10002", NULL, &options) != 0) {
         throw InitFail("Couldn't open input stream");
@@ -133,6 +133,10 @@ void RTPVideoReceiver::init(const char *path) {
     std::cerr << name << ": initialized" << std::endl;
 }
 
+AVCodecContext* RTPVideoReceiver::getContext() const {
+    return codec_ctx;
+}
+
 void RTPVideoReceiver::start() {
     //startDrain();
     startReceive();
@@ -145,8 +149,8 @@ void RTPVideoReceiver::stop() {
 }
 
 void RTPVideoReceiver::startReceive() {
-    if (receive_stop_condition) {
-        receive_stop_condition = false;
+    if (receive_stop_condition.load(std::memory_order_relaxed)) {
+        receive_stop_condition.store(false, std::memory_order_relaxed);
         receive_thread = std::thread(&RTPVideoReceiver::receive, this);
     }
 }
@@ -156,7 +160,7 @@ void RTPVideoReceiver::receive() {
     int ret;
     AVPacket *packet = av_packet_alloc();
     try {
-        while (initialized && !receive_stop_condition) {
+        while (initialized.load(std::memory_order_relaxed) && !receive_stop_condition.load(std::memory_order_relaxed)) {
             if (av_read_frame(format_ctx, packet) < 0) {
                 throw RunError("can't grab frame");
             }
@@ -206,17 +210,21 @@ void RTPVideoReceiver::receive() {
 }
 
 void RTPVideoReceiver::stopReceive() {
-    if (!receive_stop_condition) {
-        receive_stop_condition = true;
+    if (!receive_stop_condition.load(std::memory_order_relaxed)) {
+        receive_stop_condition.store(true, std::memory_order_relaxed);
         if (receive_thread.joinable()) {
             receive_thread.join();
+        } else {
+            std::cout << name << ": keepalive thread is not joinable" << std::endl;
         }
+    } else {
+        std::cout << name << ": keepalive thread already stopped" << std::endl;
     }
 }
 
 void RTPVideoReceiver::startDrain() {
-    if (drain_stop_condition) {
-        drain_stop_condition = false;
+    if (drain_stop_condition.load(std::memory_order_relaxed)) {
+        drain_stop_condition.store(false, std::memory_order_relaxed);
         drain_thread = std::thread(&RTPVideoReceiver::drain, this);
     }
 }
@@ -228,7 +236,7 @@ void RTPVideoReceiver::drain() {
     //AVFrame *sw_frame = av_frame_alloc();
     int ret = 0;
     try {
-        while (initialized && !drain_stop_condition) {
+        while (initialized.load(std::memory_order_relaxed) && !drain_stop_condition.load(std::memory_order_relaxed)) {
             decoder_lock.lock();
             ret = avcodec_receive_frame(codec_ctx, frame);
             decoder_lock.unlock();
@@ -259,21 +267,25 @@ void RTPVideoReceiver::drain() {
 }
 
 void RTPVideoReceiver::stopDrain() {
-    if (!drain_stop_condition) {
-        drain_stop_condition = true;
+    if (!drain_stop_condition.load(std::memory_order_relaxed)) {
+        drain_stop_condition.store(true, std::memory_order_relaxed);
         if (drain_thread.joinable()) {
             drain_thread.join();
+        } else {
+            std::cout << name << ": keepalive thread is not joinable" << std::endl;
         }
+    } else {
+        std::cout << name << ": keepalive thread already stopped" << std::endl;
     }
 }
 
 void RTPVideoReceiver::flush() {
-    if (!receive_stop_condition || !drain_stop_condition) {
+    if (!receive_stop_condition.load(std::memory_order_relaxed) || !drain_stop_condition.load(std::memory_order_relaxed)) {
         std::cout << name << ": flush order ignored, stop threads first" << std::endl;
         return;
     }
 
-    if (!initialized) {
+    if (!initialized.load(std::memory_order_relaxed)) {
         std::cout << name << ": is not initialized, nothing to do" << std::endl;
         return;
     }

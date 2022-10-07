@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <chrono>
 #include <thread>
+#include <atomic>
 #include "spinlock.h"
 #include "CommandSink.h"
 
@@ -16,24 +17,27 @@
 
 class CommandSocket: public CommandSink {
 private:
-    RTPAudioReceiver &rtp_audio;
-    RTPVideoReceiver &rtp_video;
+    std::string name;
+    bool initialized = false;
+
+    RTPAudioReceiver rtp_audio;
+    RTPVideoReceiver rtp_video;
     SDLDisplay &display;
 
     int tcp_socket = -1;
     int udp_socket = -1;
 
-    bool listen_stop_condition = true;
+    std::atomic<bool> listen_stop_condition = true;
     std::thread listen_thread;
     simdjson::ondemand::parser parser;
     std::chrono::steady_clock::time_point send_timepoint;
     spinlock send_lock;
 
-    bool keepalive_stop_condition = true;
+    std::atomic<bool> keepalive_stop_condition = true;
     std::thread keepalive_thread;
 
 public:
-    explicit CommandSocket(RTPAudioReceiver &rtp_audio, RTPVideoReceiver &rtp_video, SDLDisplay &display);
+    explicit CommandSocket(SDLDisplay &display);
     ~CommandSocket() override;
 
     void init(const char *remote_ip, uint16_t remote_port, uint16_t local_port);

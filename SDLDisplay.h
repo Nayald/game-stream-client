@@ -22,16 +22,20 @@ extern "C" {
 
 class SDLDisplay : public Sink<AVFrame>, public CommandSource {
 private:
+    std::string name;
+    bool initialized = false;
+
     bool NV12;
 
-    SDL_Window *screen;
-    SDL_Renderer *renderer;
-    SDL_Texture *texture_rgb;
-    SDL_Texture *texture_yuv420;
-    SDL_Texture *texture_nv12;
-    SDL_Rect rectangle;
+    SDL_Window *screen = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    SDL_Texture *texture_rgb = nullptr;
+    SDL_Texture *texture_yuv420 = nullptr;
+    SDL_Texture *texture_nv12 = nullptr;
     SDL_Event event;
     std::unordered_set<SDL_GameController*> gamepads;
+
+
 
     bool display_stop_condition = true;
     std::thread display_thread;
@@ -39,6 +43,9 @@ private:
 
     bool audio_stop_condition = true;
     std::thread audio_thread;
+    SDL_AudioDeviceID dev;
+    SDL_AudioSpec given;
+    moodycamel::ConcurrentQueue<uint8_t> sample_queue;
     moodycamel::BlockingConcurrentQueue<AVFrame*> audio_frame_queue;
 
     bool event_stop_condition = true;
@@ -48,6 +55,14 @@ public:
     SDLDisplay();
     ~SDLDisplay() override;
 
+
+    void init(AVCodecContext *audio_ctx, AVCodecContext *video_ctx);
+    void initAudio(AVCodecContext *audio_ctx);
+    void initVideo(AVCodecContext *video_ctx);
+
+    void start();
+    void stop();
+
     void startDisplay();
     void runDisplay();
     void stopDisplay();
@@ -56,11 +71,15 @@ public:
     void runAudio();
     void stopAudio();
 
-    void startListening();
-    void listenEvent();
-    void stopListening();
+    void startEvent();
+    void runEvent();
+    void stopEvent();
 
     void handle(AVFrame *frame) override;
+
+private:
+    void displayImpl(AVFrame *frame);
+    void audioImpl(AVFrame *frame);
 };
 
 #endif //REMOTE_DESKTOP_SDLDISPLAY_H

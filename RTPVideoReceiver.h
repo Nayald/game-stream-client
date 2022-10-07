@@ -10,6 +10,7 @@ extern "C" {
 };
 
 #include <thread>
+#include <atomic>
 #include <condition_variable>
 
 #include "source.h"
@@ -18,17 +19,17 @@ extern "C" {
 class RTPVideoReceiver :  public Source<AVPacket>, public Source<AVFrame> {
 private:
     std::string name;
-    bool initialized = false;
+    std::atomic<bool> initialized = false;
 
     AVFormatContext *format_ctx = nullptr;
     AVBufferRef *hw_device_ctx = nullptr;
     int stream_index;
     AVCodecContext *codec_ctx = nullptr;
 
-    bool receive_stop_condition = true;
+    std::atomic<bool> receive_stop_condition = true;
     std::thread receive_thread;
 
-    bool drain_stop_condition = true;
+    std::atomic<bool> drain_stop_condition = true;
     std::thread drain_thread;
 
     spinlock decoder_lock;
@@ -40,6 +41,7 @@ public:
     ~RTPVideoReceiver();
 
     void init(const char *path);
+    AVCodecContext* getContext() const;
 
     void start();
     void stop();
