@@ -91,13 +91,13 @@ void CommandSocket::init(const char *remote_ip, uint16_t remote_port, uint16_t l
 
 void CommandSocket::start() {
     startListen();
-    startKeepAlive();
+    //startKeepAlive();
     display.startEvent();
 }
 
 void CommandSocket::stop() {
     display.stopEvent();
-    stopKeepAlive();
+    //stopKeepAlive();
     stopListen();
 }
 
@@ -109,8 +109,8 @@ void CommandSocket::startListen() {
 void CommandSocket::listen() {
     fd_set fds;
     timeval tv;
-    char buffer[BUFFER_SIZE];
-    char stream_buffer[2 * BUFFER_SIZE];
+    uint8_t buffer[BUFFER_SIZE];
+    uint8_t stream_buffer[2 * BUFFER_SIZE];
     size_t stream_size = 0;
     while (!listen_stop_condition.load(std::memory_order_relaxed)) {
         FD_ZERO(&fds);
@@ -125,18 +125,42 @@ void CommandSocket::listen() {
             continue;
         } else {
             if (FD_ISSET(tcp_socket, &fds)) {
-                if (stream_size >= sizeof(stream_buffer)) {
-                    std::memmove(stream_buffer, stream_buffer + 1, stream_size -= 1);
+                ssize_t size = recv(tcp_socket, stream_buffer + stream_size, sizeof(stream_buffer) - stream_size, 0);
+                if (size < 0) {
+                    if (errno != EAGAIN || errno != EWOULDBLOCK) {
+                        throw RunError("error while reading socket");
+                    }
+                    continue;
                 }
 
-                ssize_t size = recv(tcp_socket, stream_buffer + stream_size, sizeof(stream_buffer) - stream_size, 0);
-                if (size > 0) {
-                    stream_size += size;
-                    size_t parsed_size = handleCommand(stream_buffer, stream_size, sizeof(stream_buffer));
-                    if (parsed_size > 0) {
-                        std::memmove(stream_buffer, stream_buffer + parsed_size, stream_size -= parsed_size);
-                    }
+                // ret == 0 means disconnection
+                if (size == 0) {
+                    continue;
                 }
+
+                stream_size += size;
+                size_t start_offset = 0;
+                static constexpr uint8_t delimiter = 0xff;
+                uint16_t msg_size;
+                while (start_offset + sizeof(delimiter) + sizeof(msg_size) <= stream_size) {
+                    if (stream_buffer[start_offset] != delimiter) {
+                        start_offset += sizeof(delimiter);
+                        continue;
+                    }
+
+                    msg_size = ntohs(*reinterpret_cast<uint16_t*>(stream_buffer + start_offset + sizeof(delimiter)));
+                    // incomplete message
+                    if (start_offset + msg_size + sizeof(msg_size) + sizeof(delimiter) > stream_size) {
+                        break;
+                    }
+
+
+                    handleCommand(stream_buffer + start_offset + sizeof(msg_size) + sizeof(delimiter), msg_size, sizeof(stream_buffer) - start_offset - sizeof(msg_size) - sizeof(delimiter));
+                    start_offset += msg_size + sizeof(msg_size) + sizeof(delimiter);
+                };
+
+                // consume read data
+                std::memmove(stream_buffer, stream_buffer + start_offset, stream_size -= start_offset);
             }
 
             if (FD_ISSET(udp_socket, &fds)) {
@@ -183,7 +207,7 @@ void CommandSocket::stopKeepAlive() {
     }
 }
 
-size_t CommandSocket::handleCommand(const char *buffer, size_t size, size_t capacity) {
+size_t CommandSocket::handleCommand(const uint8_t *buffer, size_t size, size_t capacity) {
     size_t parsed_size = 0;
     try {
         simdjson::ondemand::document document = parser.iterate(buffer, size, capacity);
@@ -271,7 +295,13 @@ void CommandSocket::writeCommand(const char *msg, size_t size) {
 }
 
 void CommandSocket::writeCommandImpl(const char *msg, size_t size) {
+    uint8_t msg_header[3];
+    msg_header[0] = 0xff;
+    for (size_t i = 0; i < sizeof(msg_header) - 1; i++) {
+        msg_header[sizeof(msg_header) - 1 - i] = (size >> (8 * (sizeof(size) - i))) & 0xff;
+    }
     send_lock.lock();
+    send(tcp_socket, msg_header, sizeof(msg_header), 0);
     send(tcp_socket, msg, size, 0);
     send_timepoint = std::chrono::steady_clock::now();
     send_lock.unlock();

@@ -53,13 +53,13 @@ public:
     void keepAlive();
     void stopKeepAlive();
 
-    size_t handleCommand(const char *buffer, size_t size, size_t capacity);
+    size_t handleCommand(const uint8_t *buffer, size_t size, size_t capacity);
     void writeCommand(const std::string &msg);
     void writeCommand(const char *msg, size_t size);
     void writeCommandImpl(const char *msg, size_t size);
 
-    virtual void handle(const std::string &msg) override;
-    virtual void handle(const char *msg, size_t size) override;
+    void handle(const std::string &msg) override;
+    void handle(const char *msg, size_t size) override;
 };
 
 
