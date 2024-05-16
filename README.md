@@ -16,3 +16,12 @@ FFmpeg 4.4.2 dev libs:
 * libavutil
 
 SDL2 2.0.16+
+
+# installation
+On Ubuntu 22.04
+* sudo apt install cmake libavdevice-dev libsdl2-dev
+* git clone --recurse-submodules https://github.com/Nayald/game-stream-client.git
+* cd game-stream-client
+* cmake CMakeLists.txt
+* make all
+
